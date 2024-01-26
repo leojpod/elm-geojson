@@ -2,44 +2,84 @@ module Tests exposing (..)
 
 import Expect exposing (Expectation)
 import Fuzz exposing (Fuzzer)
-import GeoJson exposing (Bbox, FeatureObject, GeoJson, GeoJsonObject(..), Geometry(..), Position, decoder)
-import Json.Decode exposing (decodeString)
-import Json.Encode
+import GeoJson exposing (Bbox, CustomGeoJson, FeatureObject, GeoJson, GeoJsonObject(..), Geometry(..), Position, decoder)
+import Json.Decode as D exposing (decodeString)
+import Json.Encode as E
 import Test exposing (..)
+import Time exposing (Posix)
 
 
-emptyObject : Json.Encode.Value
+type alias TimeProps =
+    { time : Posix }
+
+
+type alias TimedGeoJson =
+    CustomGeoJson TimeProps
+
+
+propsDecoder : D.Decoder TimeProps
+propsDecoder =
+    D.field "time" (D.map (Time.millisToPosix >> TimeProps) D.int)
+
+
+encodeProps : TimeProps -> E.Value
+encodeProps { time } =
+    E.object [ ( "time", E.int <| Time.posixToMillis time ) ]
+
+
+emptyObject : E.Value
 emptyObject =
-    Json.Encode.object []
+    E.object []
 
 
 encodeAndDecode : Test
 encodeAndDecode =
-    fuzzWith { runs = 30 } fuzzGeoJson "encoding and decoding does not change the GeoJson" <|
+    fuzzWith { runs = 30, distribution = noDistribution } fuzzGeoJson "encoding and decoding does not change the GeoJson" <|
         \geojson ->
-            GeoJson.encode geojson |> Json.Decode.decodeValue decoder |> Expect.equal (Ok geojson)
+            geojson
+                |> GeoJson.encode
+                |> D.decodeValue GeoJson.decoder
+                |> Expect.equal (Ok geojson)
+
+
+encodeAndDecodeCustom : Test
+encodeAndDecodeCustom =
+    fuzzWith { runs = 30, distribution = noDistribution } fuzzTimedGeoJson "encoding and decoding does not change the CustomGeoJson" <|
+        \geojson ->
+            geojson
+                |> GeoJson.encodeCustom encodeProps
+                |> D.decodeValue (GeoJson.customDecoder propsDecoder)
+                |> Expect.equal (Ok geojson)
 
 
 fuzzGeoJson : Fuzzer GeoJson
 fuzzGeoJson =
-    Fuzz.tuple
-        ( fuzzGeoJsonObject
-        , Fuzz.maybe fuzzBbox
-        )
+    Fuzz.pair
+        (fuzzGeoJsonObject (Fuzz.constant emptyObject))
+        (Fuzz.maybe fuzzBbox)
 
 
-fuzzGeoJsonObject =
+fuzzTimedGeoJson : Fuzzer (CustomGeoJson { time : Posix })
+fuzzTimedGeoJson =
+    Fuzz.pair
+        (fuzzGeoJsonObject fuzzTimeProps)
+        (Fuzz.maybe fuzzBbox)
+
+
+fuzzGeoJsonObject : Fuzzer props -> Fuzzer (GeoJsonObject props)
+fuzzGeoJsonObject propsFuzzer =
     Fuzz.frequency
-        [ ( 1, Fuzz.map FeatureCollection (Fuzz.list fuzzFeature) )
-        , ( 1, Fuzz.map Feature fuzzFeature )
+        [ ( 1, Fuzz.map FeatureCollection (Fuzz.list (fuzzFeature propsFuzzer)) )
+        , ( 1, Fuzz.map Feature (fuzzFeature propsFuzzer) )
         , ( 7, Fuzz.map Geometry fuzzGeometry )
         ]
 
 
-fuzzFeature : Fuzzer FeatureObject
-fuzzFeature =
-    Fuzz.map2 (\geom id -> FeatureObject geom emptyObject id)
+fuzzFeature : Fuzzer props -> Fuzzer (FeatureObject props)
+fuzzFeature propsFuzzer =
+    Fuzz.map3 (\geom props id -> FeatureObject geom props id)
         (Fuzz.maybe fuzzGeometry)
+        propsFuzzer
         (Fuzz.maybe Fuzz.string)
 
 
@@ -67,7 +107,7 @@ fuzzGeometry =
 fuzzPosition : Fuzzer Position
 fuzzPosition =
     Fuzz.frequency
-        [ ( 1, Fuzz.map2 (\a b -> ( a, b, 0 )) Fuzz.float Fuzz.float )
+        [ ( 1, Fuzz.map2 (\a b -> ( a, b, 0 )) Fuzz.niceFloat Fuzz.niceFloat )
         , ( 1
           , Fuzz.map3
                 (\a b c ->
@@ -81,20 +121,25 @@ fuzzPosition =
                     in
                     ( a, b, c_ )
                 )
-                Fuzz.float
-                Fuzz.float
-                Fuzz.float
+                Fuzz.niceFloat
+                Fuzz.niceFloat
+                Fuzz.niceFloat
           )
         ]
 
 
 fuzzBbox : Fuzzer Bbox
 fuzzBbox =
-    Fuzz.tuple
-        ( Fuzz.tuple ( Fuzz.float, Fuzz.float )
-        , Fuzz.tuple ( Fuzz.float, Fuzz.float )
-        )
+    Fuzz.pair
+        (Fuzz.pair Fuzz.niceFloat Fuzz.niceFloat)
+        (Fuzz.pair Fuzz.niceFloat Fuzz.niceFloat)
         |> Fuzz.map (\( ( a, b ), ( c, d ) ) -> [ a, b, c, d ])
+
+
+fuzzTimeProps : Fuzzer { time : Posix }
+fuzzTimeProps =
+    Fuzz.intAtLeast 0
+        |> Fuzz.map (\millis -> { time = Time.millisToPosix millis })
 
 
 expectErr : Result a b -> Expectation
@@ -355,13 +400,13 @@ geometryExamples =
                             (Ok
                                 ( FeatureCollection
                                     [ { geometry = Just (Point ( 102, 0.5, 0 ))
-                                      , properties = Json.Encode.object [ ( "prop0", Json.Encode.string "value0" ) ]
+                                      , properties = E.object [ ( "prop0", E.string "value0" ) ]
                                       , id = Nothing
                                       }
                                     , { geometry = Just (LineString [ ( 102, 0, 0 ), ( 103, 1, 0 ), ( 104, 0, 0 ), ( 105, 1, 0 ) ])
                                       , properties =
-                                            Json.Encode.object
-                                                [ ( "prop0", Json.Encode.string "value0" ), ( "prop1", Json.Encode.int 0 ) ]
+                                            E.object
+                                                [ ( "prop0", E.string "value0" ), ( "prop1", E.int 0 ) ]
                                       , id = Nothing
                                       }
                                     , { geometry =
@@ -370,10 +415,10 @@ geometryExamples =
                                                     [ [ ( 100, 0, 0 ), ( 101, 0, 0 ), ( 101, 1, 0 ), ( 100, 1, 0 ), ( 100, 0, 0 ) ] ]
                                                 )
                                       , properties =
-                                            Json.Encode.object
-                                                [ ( "prop0", Json.Encode.string "value0" )
+                                            E.object
+                                                [ ( "prop0", E.string "value0" )
                                                 , ( "prop1"
-                                                  , Json.Encode.object [ ( "this", Json.Encode.string "that" ) ]
+                                                  , E.object [ ( "this", E.string "that" ) ]
                                                   )
                                                 ]
                                       , id = Nothing

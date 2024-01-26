@@ -1,4 +1,8 @@
-module GeoJson exposing (Bbox, FeatureObject, GeoJson, GeoJsonObject(..), Geometry(..), Position, decoder, encode)
+module GeoJson exposing
+    ( decoder, customDecoder
+    , GeoJson, CustomGeoJson, GeoJsonObject(..), FeatureObject, Geometry(..), Position, Bbox
+    , encode, encodeCustom
+    )
 
 {-| Decode [GeoJson](https://tools.ietf.org/html/rfc7946) into an Elm data
 structure where you can operate on it further. Most of this module defines types
@@ -15,19 +19,19 @@ Neither encoding nor decoding attempt to enforce minimum array lengths.
 
 # Decoder
 
-@docs decoder
+@docs decoder, customDecoder
 
 
 # Elm Representation of GeoJSON
 
 All union types are fully exposed so you can inspect them as necessary.
 
-@docs GeoJson, GeoJsonObject, FeatureObject, Geometry, Position, Bbox
+@docs GeoJson, CustomGeoJson, GeoJsonObject, FeatureObject, Geometry, Position, Bbox
 
 
 # Encoding
 
-@docs encode
+@docs encode, encodeCustom
 
 -}
 
@@ -46,7 +50,13 @@ type alias Bbox =
 {-| The root representation of GeoJSON in Elm. It consists of a `GeoJsonObject` and an optional `Bbox`.
 -}
 type alias GeoJson =
-    ( GeoJsonObject, Maybe Bbox )
+    ( GeoJsonObject Json.Value, Maybe Bbox )
+
+
+{-| A `GeoJson` with an custom value for the properties field. This can be useful if you need to decode some values from all your `FeatureObject`s.
+-}
+type alias CustomGeoJson props =
+    ( GeoJsonObject props, Maybe Bbox )
 
 
 {-| A GeoJsonObject contains the primary data, and is either a `Geometry`, a
@@ -56,10 +66,10 @@ Note that the tag for `FeatureObject` is just `Feature`, to avoid a name
 collision.
 
 -}
-type GeoJsonObject
+type GeoJsonObject props
     = Geometry Geometry
-    | Feature FeatureObject
-    | FeatureCollection (List FeatureObject)
+    | Feature (FeatureObject props)
+    | FeatureCollection (List (FeatureObject props))
 
 
 {-| A `FeatureObject` represents a geographic feature. The `geometry` field is
@@ -69,9 +79,9 @@ inspect it. The `id` is an optional "commonly used identifier". It is permitted
 by the RFC to be either a string or a number; if the latter this implementation
 converts it to a string.
 -}
-type alias FeatureObject =
+type alias FeatureObject props =
     { geometry : Maybe Geometry
-    , properties : Json.Value
+    , properties : props
     , id : Maybe String
     }
 
@@ -109,26 +119,35 @@ type alias Position =
     ( Float, Float, Float )
 
 
+{-| Decode CustomGeoJSON into Elm. The decoded value is expressed in the types defined by this module and the type parameter.
+-}
+customDecoder : Decoder props -> Decoder (CustomGeoJson props)
+customDecoder propsDecoder =
+    D.map2 Tuple.pair
+        (decodeGeoJson propsDecoder)
+        (D.maybe (field "bbox" decodeBbox))
+
+
 {-| Decode GeoJSON into Elm. The decoded value is expressed in the types defined
 by this module.
 -}
 decoder : Decoder GeoJson
 decoder =
     D.map2 Tuple.pair
-        decodeGeoJson
+        (decodeGeoJson D.value)
         (D.maybe (field "bbox" decodeBbox))
 
 
-decodeGeoJson : Decoder GeoJsonObject
-decodeGeoJson =
+decodeGeoJson : Decoder props -> Decoder (GeoJsonObject props)
+decodeGeoJson propsDecoder =
     let
         helper h_tipe =
             case h_tipe of
                 "Feature" ->
-                    D.map Feature decodeFeature
+                    D.map Feature (decodeFeature propsDecoder)
 
                 "FeatureCollection" ->
-                    D.map FeatureCollection (field "features" (D.list decodeFeature))
+                    D.map FeatureCollection (field "features" (D.list (decodeFeature propsDecoder)))
 
                 _ ->
                     D.map Geometry decodeGeometry
@@ -137,8 +156,8 @@ decodeGeoJson =
         |> D.andThen helper
 
 
-decodeFeature : Decoder FeatureObject
-decodeFeature =
+decodeFeature : Decoder props -> Decoder (FeatureObject props)
+decodeFeature propsDecoder =
     D.map3 FeatureObject
         (field "geometry"
             (D.oneOf
@@ -147,7 +166,7 @@ decodeFeature =
                 ]
             )
         )
-        (field "properties" D.value)
+        (field "properties" propsDecoder)
         (D.maybe (field "id" (D.oneOf [ D.string, D.map String.fromInt D.int ])))
 
 
@@ -230,26 +249,31 @@ Positions with an altitude of zero will be encoded as two-element arrays.
 -}
 encode : GeoJson -> Json.Value
 encode ( geojson, bbox ) =
-    Json.object <| encodeGeoJson geojson ++ encodeBbox bbox
+    Json.object <| encodeGeoJson identity geojson ++ encodeBbox bbox
 
 
-encodeGeoJson : GeoJsonObject -> List ( String, Json.Value )
-encodeGeoJson geojson =
+encodeCustom : (props -> Json.Value) -> CustomGeoJson props -> Json.Value
+encodeCustom encodeProps ( geojson, bbox ) =
+    Json.object <| encodeGeoJson encodeProps geojson ++ encodeBbox bbox
+
+
+encodeGeoJson : (props -> Json.Value) -> GeoJsonObject props -> List ( String, Json.Value )
+encodeGeoJson encodeProps geojson =
     case geojson of
         Feature feature ->
-            encodeFeature feature
+            encodeFeature encodeProps feature
 
         FeatureCollection features ->
             [ ( "type", Json.string "FeatureCollection" )
-            , ( "features", features |> Json.list (encodeFeature >> Json.object) )
+            , ( "features", features |> Json.list (encodeFeature encodeProps >> Json.object) )
             ]
 
         Geometry geometry ->
             encodeGeometry geometry
 
 
-encodeFeature : FeatureObject -> List ( String, Json.Value )
-encodeFeature { geometry, properties, id } =
+encodeFeature : (props -> Json.Value) -> FeatureObject props -> List ( String, Json.Value )
+encodeFeature encodeProps { geometry, properties, id } =
     let
         encodedId =
             case id of
@@ -261,7 +285,7 @@ encodeFeature { geometry, properties, id } =
     in
     [ ( "type", Json.string "Feature" )
     , ( "geometry", geometry |> Maybe.map (encodeGeometry >> Json.object) |> Maybe.withDefault Json.null )
-    , ( "properties", properties )
+    , ( "properties", encodeProps properties )
     ]
         ++ encodedId
 
